@@ -9,6 +9,7 @@ import type {
   SupervisorRunHealth,
   SupervisorRunState,
 } from "./supervisor-types";
+import { presentTimelineEvent } from "./timeline-presentation";
 
 const POLL_INTERVAL_MS = 2_000;
 
@@ -58,25 +59,60 @@ function Counter({
 }
 
 function EventRow({ event }: { event: SupervisorEventRecord }) {
-  const command =
-    typeof event.payload.command === "string" ? event.payload.command : null;
+  const presentation = presentTimelineEvent(event);
+  const kafkaPosition =
+    event.offset === null
+      ? "Not recorded"
+      : `${event.topic ?? "unknown topic"} · partition ${event.partition ?? "?"} · offset ${event.offset}`;
   return (
     <li className={"sup-event sup-event-" + event.severity}>
       <span className="sup-event-time">{formatClock(event.occurredAt)}</span>
       <div className="sup-event-body">
         <div className="sup-event-head">
-          <code>{event.type}</code>
-          <span className="sup-chip">{event.source}</span>
-          {event.offset !== null && (
-            <span className="sup-chip sup-chip-quiet">
-              {event.topic}·p{event.partition}·{event.offset}
+          <strong>{presentation.title}</strong>
+          {presentation.status && (
+            <span className="sup-chip">{presentation.status}</span>
+          )}
+          {event.severity !== "info" && (
+            <span className={"sup-chip sup-chip-" + event.severity}>
+              {event.severity}
             </span>
           )}
         </div>
-        <p>{event.summary}</p>
-        {command && event.type !== "run.tool_activity" && (
-          <pre className="sup-evidence">{command}</pre>
-        )}
+        {presentation.description && <p>{presentation.description}</p>}
+        <details className="sup-event-details">
+          <summary>Technical details</summary>
+          <dl>
+            <div>
+              <dt>Event</dt>
+              <dd><code>{event.type}</code></dd>
+            </div>
+            <div>
+              <dt>Source</dt>
+              <dd>{event.source}</dd>
+            </div>
+            <div>
+              <dt>Kafka position</dt>
+              <dd>{kafkaPosition}</dd>
+            </div>
+            <div>
+              <dt>Event ID</dt>
+              <dd><code>{event.eventId}</code></dd>
+            </div>
+          </dl>
+          {presentation.command && (
+            <div className="sup-event-technical-block">
+              <span>Original command</span>
+              <pre className="sup-evidence">{presentation.command}</pre>
+            </div>
+          )}
+          {presentation.output && (
+            <div className="sup-event-technical-block">
+              <span>Command output</span>
+              <pre className="sup-evidence">{presentation.output}</pre>
+            </div>
+          )}
+        </details>
       </div>
     </li>
   );

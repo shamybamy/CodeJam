@@ -1,19 +1,21 @@
 # Local POC
 
 The local profile runs the React/Fastify control plane on macOS or Linux and
-starts every Codex turn in a disposable Docker, Colima, or Podman container.
-Only the Volcengine Ark model API is remote.
+starts every Codex turn in a disposable container. The complete supervisor path
+uses Docker Compose for local Kafka, SQLite for its ledger, and Ollama for local
+model execution. No remote model service is required.
 
 ## Start
 
 Requirements:
 
 - Node.js 22+
-- Docker, Colima, or Podman
-- An Ark API key and Responses-capable endpoint
+- Docker with Docker Compose
+- Ollama with `qwen3:8b`
 
 ```bash
-ARK_API_KEY=your-ark-api-key ARK_MODEL=ep-your-endpoint-id npm run poc
+ollama pull qwen3:8b
+npm run poc
 ```
 
 Open <http://localhost:3000>. Press `Ctrl+C` to stop the server and remove this
@@ -41,8 +43,10 @@ remain active, but this fallback is not tenant isolation.
 
 ## Rootless Podman on Linux
 
-This path requires no Docker or Compose. It supports Ubuntu 22.04/24.04, Debian
-12, and veLinux 2.
+This legacy baseline-only path requires no Docker or Compose. It disables Kafka
+and therefore does not run the supervisor middleware. Use Docker Compose for a
+review or demo of this submission. It supports Ubuntu 22.04/24.04, Debian 12,
+and veLinux 2.
 
 Install Podman:
 
@@ -87,8 +91,7 @@ podman run --rm docker.io/library/alpine:3.20 echo PODMAN_OK
 
 ```bash
 CONTAINER_ENGINE=podman \
-ARK_API_KEY=your-ark-api-key \
-ARK_MODEL=ep-your-endpoint-id \
+KAFKA_ENABLED=false \
 npm run poc
 ```
 
@@ -100,8 +103,6 @@ build.
 
 ```bash
 CONTAINER_RUNTIME_APT_PACKAGES='ca-certificates git ripgrep python3 build-essential' \
-ARK_API_KEY=your-ark-api-key \
-ARK_MODEL=ep-your-endpoint-id \
 npm run poc
 ```
 

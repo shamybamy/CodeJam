@@ -1,15 +1,17 @@
-# Volc Agent Launchpad
+# Kafka Agent Run Supervisor
 
-A minimal Agent platform for three-day middleware hackathons. It provides Agent
-CRUD, a browser Playground, persistent workspaces, and Codex CLI backed by the
-Volcengine Ark Responses API.
+A local Agent platform with Kafka-backed run supervision. It provides Agent
+CRUD, a browser Playground, persistent workspaces, disposable Codex Runtime
+containers, a queryable run ledger, failure recovery, suspicious-activity
+alerts, and a read-only operator chatbot.
 
-Run it locally with Docker, Colima, or rootless Podman, or deploy it to
-Volcengine ECS.
+The complete middleware POC runs locally with Docker, Kafka, SQLite, and Ollama.
+It does not require a paid model API or cloud service.
 
 > [!WARNING]
-> This is a single-user proof of concept. It intentionally has no identity,
-> tracing, audit, or hardened sandbox middleware. Do not use production data or
+> This is a single-user proof of concept. It includes run tracing and an
+> operational ledger, but it does not provide user identity, RBAC, tenant
+> isolation, or a hardened multi-tenant sandbox. Do not use production data or
 > credentials. See [SECURITY.md](SECURITY.md).
 
 ## Screenshots
@@ -28,8 +30,11 @@ Volcengine ECS.
 - Agent create, edit, start, stop, delete, and multi-turn chat
 - Fastify control plane with asynchronous Run state
 - Persistent Agent workspaces and Codex sessions
-- Disposable Docker, Colima, or Podman container for each local turn
-- Docker and Terraform deployment paths for Volcengine ECS
+- Disposable Docker container for each local turn
+- Kafka event and command topics with a durable SQLite ledger
+- Runtime heartbeats, stall detection, exact-container cancellation, and recovery
+- Deterministic suspicious-activity alerts with stored evidence
+- Read-only operator chatbot grounded in six allowlisted ledger tools
 
 ## Run supervisor middleware
 
@@ -40,10 +45,6 @@ that stop heartbeating, deterministic rules flag suspicious tool use, and a
 read-only operator chatbot answers questions from the stored evidence. It runs
 entirely locally against Ollama, with no paid service.
 
-```bash
-ENABLE_DEMO_CONTROLS=true npm run poc
-```
-
 See [docs/SUPERVISOR.md](docs/SUPERVISOR.md) for the architecture, event
 contracts, rule set, API reference, and the demo runbook.
 
@@ -51,8 +52,8 @@ contracts, rule set, API reference, and the demo runbook.
 
 - Node.js 22+
 - npm 10+
-- Docker, Colima, or Podman
-- A Volcengine Ark API key and endpoint that supports the Responses API
+- Docker with Docker Compose (Docker Desktop is suitable)
+- Ollama with the `qwen3:8b` model
 
 Codex CLI is included in the Runtime image and is not required on the host.
 
@@ -60,39 +61,57 @@ Codex CLI is included in the Runtime image and is not required on the host.
 
 ### 1. Check the local tools
 
-Install Node.js 22+ and one supported container engine, then verify them:
+Install Node.js 22+, Docker with Compose, and Ollama, then verify them:
 
 ```bash
 node --version
 npm --version
 docker --version        # Docker Desktop, Docker Engine, or Colima
-podman --version        # Use this instead when running Podman
+docker compose version
+ollama --version
 ```
 
-Only one container engine is required. Codex CLI is already included in the
-Runtime image.
+Docker must be running. Codex CLI is already included in the Runtime image and
+is not required on the host.
 
 ### 2. Clone the repository
 
 ```bash
-git clone <repository-url> volc-agent-launchpad
-cd volc-agent-launchpad
+git clone https://github.com/shamybamy/CodeJam.git
+cd CodeJam
 ```
 
 Skip this step when already working from the repository root.
 
-### 3. Start the POC
+### 3. Prepare the local model
 
 ```bash
-ARK_API_KEY=your-ark-api-key \
-ARK_MODEL=ep-your-endpoint-id \
+ollama pull qwen3:8b
+ollama list
+```
+
+Ensure Ollama is running before starting the platform. The desktop application
+normally starts it automatically; otherwise run `ollama serve` in another
+terminal. The model only needs to be pulled once.
+
+When the control plane runs inside WSL while Ollama Desktop runs on Windows,
+follow the [WSL Ollama note](docs/SUPERVISOR.md#reaching-ollama-from-the-control-plane).
+
+### 4. Start the POC
+
+```bash
 npm run poc
 ```
 
-The first run installs Node.js dependencies and builds the Runtime image. The
-script automatically selects Docker, Colima, or Podman.
+The first run installs dependencies, builds the Runtime image, starts the local
+Kafka broker, builds both applications, and serves the platform. Enable the
+failure-simulation button only when rehearsing the demo:
 
-### 4. Open the browser
+```bash
+ENABLE_DEMO_CONTROLS=true npm run poc
+```
+
+### 5. Open the browser
 
 Visit <http://localhost:3000>, or open it from the terminal:
 
@@ -115,7 +134,7 @@ In the Web UI:
 The Agent can write files, run commands, and continue the same Codex session in
 later messages.
 
-### 5. Stop and resume
+### 6. Stop and resume
 
 Press `Ctrl+C` in the startup terminal. The script removes temporary Runtime
 containers but keeps Agent workspaces and conversations.
@@ -126,21 +145,9 @@ containers but keeps Agent workspaces and conversations.
 
 Run the same `npm run poc` command to continue later.
 
-### Select a specific container engine
-
-Force Podman when multiple engines are installed:
-
-```bash
-CONTAINER_ENGINE=podman \
-ARK_API_KEY=your-ark-api-key \
-ARK_MODEL=ep-your-endpoint-id \
-npm run poc
-```
-
-Colima uses `CONTAINER_ENGINE=docker` because it exposes the Docker CLI.
-
-For a clean Linux host, follow the
-[rootless Podman setup](docs/LOCAL_POC.md#rootless-podman-on-linux).
+The Kafka supervisor requires Docker Compose. A baseline-only Podman path is
+documented in [docs/LOCAL_POC.md](docs/LOCAL_POC.md), but it disables the
+middleware and is not the reviewer path.
 
 ## Docker Compose
 
@@ -150,11 +157,15 @@ Create and edit the configuration:
 ./scripts/bootstrap-local.sh
 ```
 
-Required values in `.env`:
+The Compose deployment path is retained from the starter repository. For local
+review, prefer `npm run poc`. If using Compose directly, copy `.env.example` and
+review its values:
 
 ```dotenv
-ARK_API_KEY=your-ark-api-key
-ARK_MODEL=ep-your-endpoint-id
+MODEL_PROVIDER=ollama
+MODEL_API_KEY=ollama
+MODEL_ID=qwen3:8b
+MODEL_BASE_URL=http://host.docker.internal:11434/v1
 APP_AUTH_TOKEN=replace-with-at-least-24-random-characters
 ```
 
@@ -215,11 +226,15 @@ cp deploy/volcengine/terraform.tfvars.example \
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ARK_API_KEY` | Required | Ark model API key. |
-| `ARK_MODEL` | Required | Responses-capable endpoint or model ID. |
-| `ARK_BASE_URL` | Beijing v3 endpoint | Ark OpenAI-compatible API URL. |
+| `MODEL_PROVIDER` | `ollama` | Model provider; `ark` remains optional. |
+| `MODEL_API_KEY` | `ollama` | Syntactically required; ignored by local Ollama. |
+| `MODEL_ID` | `qwen3:8b` | Agent and default chatbot model. |
+| `MODEL_BASE_URL` | Docker host Ollama URL | OpenAI-compatible model endpoint used by Runtime containers. |
 | `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
-| `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
+| `KAFKA_ENABLED` | `true` | Enables the supervisor event, ledger, and command paths. |
+| `SUPERVISOR_CHAT_BASE_URL` | Probed automatically | Optional chatbot-specific Ollama endpoint. |
+| `ENABLE_DEMO_CONTROLS` | `false` | Enables the label-verified missing-heartbeat simulation. |
+| `RUNTIME_PROVIDER` | Set by startup script | `container` for disposable local Runtime containers. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
@@ -230,13 +245,18 @@ See [.env.example](.env.example) for all Runtime and resource-limit options.
 
 ```mermaid
 flowchart LR
-    UI["React Web UI"] --> API["Fastify control plane"]
-    API --> Store["JSON metadata and Agent workspaces"]
-    API --> Runtime{"Runtime provider"}
-    Runtime -->|Local POC| Container["Disposable Docker / Colima / Podman container"]
-    Runtime -->|ECS profile| Codex["Codex CLI in application container"]
-    Container --> Ark["Volcengine Ark Responses API"]
-    Codex --> Ark
+    UI["React Playground + Supervisor"] --> API["Fastify control plane"]
+    API --> Runtime["Disposable Agent Runtime container"]
+    Runtime --> Ollama["Local Ollama qwen3:8b"]
+    Runtime --> Events["Kafka run events"]
+    API --> Events
+    Events --> Ledger["SQLite run ledger + alerts"]
+    Ledger --> API
+    Watchdog["Heartbeat watchdog"] --> Commands["Kafka run commands"]
+    Commands --> API
+    API -->|verify labels + remove| Runtime
+    Ledger --> Chat["Read-only operator chatbot"]
+    Chat --> Ollama
 ```
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
@@ -257,6 +277,7 @@ docker compose config
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Kafka run supervisor](docs/SUPERVISOR.md)
+- [Manual verification guide](docs/MANUAL_TESTING.md)
 - [Local POC](docs/LOCAL_POC.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Hackathon extension guide](docs/HACKATHON_EXTENSION_GUIDE.md)
