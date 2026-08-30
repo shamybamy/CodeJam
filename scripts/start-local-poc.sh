@@ -10,6 +10,7 @@ runtime_apt_mirror="${CONTAINER_APT_MIRROR:-}"
 runtime_apt_security_mirror="${CONTAINER_APT_SECURITY_MIRROR:-}"
 runtime_apt_packages="${CONTAINER_RUNTIME_APT_PACKAGES:-ca-certificates git ripgrep}"
 codex_sandbox_mode="${CODEX_SANDBOX_MODE:-workspace-write}"
+kafka_started=false
 
 log() {
   printf '[local-poc] %s\n' "$*" >&2
@@ -63,11 +64,39 @@ detect_engine() {
   return 1
 }
 
-if [[ -z "${ARK_API_KEY:-}" || -z "${ARK_MODEL:-}" ]]; then
-  log "ARK_API_KEY and ARK_MODEL are required."
-  log "Example: ARK_API_KEY=key ARK_MODEL=ep-id ./scripts/start-local-poc.sh"
-  exit 2
+model_provider="${MODEL_PROVIDER:-}"
+if [[ -z "$model_provider" ]]; then
+  if [[ -n "${ARK_API_KEY:-}" || -n "${ARK_MODEL:-}" ]]; then
+    model_provider=ark
+  else
+    model_provider=ollama
+  fi
 fi
+
+case "$model_provider" in
+  ollama)
+    export MODEL_PROVIDER=ollama
+    export MODEL_API_KEY="${MODEL_API_KEY:-ollama}"
+    export MODEL_ID="${MODEL_ID:-qwen3:8b}"
+    export MODEL_BASE_URL="${MODEL_BASE_URL:-http://host.docker.internal:11434/v1}"
+    ;;
+  ark)
+    export MODEL_PROVIDER=ark
+    export MODEL_API_KEY="${MODEL_API_KEY:-${ARK_API_KEY:-}}"
+    export MODEL_ID="${MODEL_ID:-${ARK_MODEL:-}}"
+    export MODEL_BASE_URL="${MODEL_BASE_URL:-${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}}"
+    if [[ -z "$MODEL_API_KEY" || -z "$MODEL_ID" ]]; then
+      log "Ark requires MODEL_API_KEY and MODEL_ID (legacy ARK_API_KEY / ARK_MODEL also work)."
+      exit 2
+    fi
+    ;;
+  *)
+    log "MODEL_PROVIDER must be ollama or ark; received: $model_provider"
+    exit 2
+    ;;
+esac
+
+log "Using $MODEL_PROVIDER model provider with model $MODEL_ID."
 
 command -v node >/dev/null 2>&1 || {
   log "Node.js 22+ is required to run the local control plane."
@@ -152,6 +181,8 @@ export CODEX_SANDBOX_MODE="$codex_sandbox_mode"
 export RUNTIME_PROVIDER=container
 export CONTAINER_ENGINE="$engine"
 export CONTAINER_RUNTIME_IMAGE="$runtime_image"
+# Demo-only "Simulate missing heartbeat" control; off unless asked for.
+export ENABLE_DEMO_CONTROLS="${ENABLE_DEMO_CONTROLS:-false}"
 
 cleanup() {
   local container_ids
@@ -164,11 +195,29 @@ cleanup() {
       [[ -n "$container_id" ]] && "$engine" rm --force "$container_id" >/dev/null 2>&1 || true
     done <<<"$container_ids"
   fi
+  if [[ "$kafka_started" == "true" ]]; then
+    log "Stopping the local Kafka broker."
+    docker compose stop kafka >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
 # Recover cleanly after a terminal or server crash from a previous local run.
 cleanup
+
+if [[ "${KAFKA_ENABLED:-true}" == "true" ]]; then
+  if [[ "$(basename "$engine")" != "docker" ]] || ! docker compose version >/dev/null 2>&1; then
+    log "The Kafka supervisor currently requires Docker Compose."
+    log "Set KAFKA_ENABLED=false to run only the baseline on another container engine."
+    exit 2
+  fi
+  log "Starting the local Kafka broker."
+  docker compose up --detach --wait kafka
+  kafka_started=true
+  export KAFKA_ENABLED=true
+  export KAFKA_BROKERS="${KAFKA_BROKERS:-127.0.0.1:29092}"
+  export SUPERVISOR_LEDGER_PATH="${SUPERVISOR_LEDGER_PATH:-$APP_DATA_DIR/supervisor.sqlite}"
+fi
 
 log "Building the local Web and API."
 npm run build

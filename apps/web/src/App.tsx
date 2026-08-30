@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, setAuthToken } from "./api";
+import SupervisorDashboard from "./SupervisorDashboard";
 import type { Agent, AgentRun, Message, SystemInfo } from "./types";
 
 const starterPrompts = [
@@ -47,6 +48,7 @@ export default function App() {
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState<"playground" | "supervisor">("playground");
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
   const [authInput, setAuthInput] = useState("");
   const messageEnd = useRef<HTMLDivElement>(null);
@@ -321,6 +323,21 @@ export default function App() {
           </div>
         </div>
 
+        <nav className="view-switch" aria-label="Sections">
+          <button
+            className={"view-tab " + (view === "playground" ? "active" : "")}
+            onClick={() => setView("playground")}
+          >
+            Playground
+          </button>
+          <button
+            className={"view-tab " + (view === "supervisor" ? "active" : "")}
+            onClick={() => setView("supervisor")}
+          >
+            Supervisor
+          </button>
+        </nav>
+
         <button
           className="button button-primary create-button"
           onClick={() => {
@@ -362,21 +379,27 @@ export default function App() {
           <span className="eyebrow">Runtime</span>
           <strong>{system?.runtime ?? "Checking…"}</strong>
           <span>
-            {system?.arkModel ?? "Ark model not configured"}
+            {system?.modelId ?? "Model not configured"}
+            {system?.modelProvider ? " · " + system.modelProvider : ""}
             {system?.containerEngine ? " · " + system.containerEngine : ""}
           </span>
         </div>
       </aside>
 
+      {view === "supervisor" ? (
+        <main className="main">
+          <SupervisorDashboard />
+        </main>
+      ) : (
       <main className="main">
-        {!system?.arkConfigured || !system?.codexAvailable ? (
+        {!system?.modelConfigured || !system?.codexAvailable ? (
           <div className="config-banner">
             <span>!</span>
             <div>
               <strong>Runtime configuration needed</strong>
               <p>
-                {!system?.arkConfigured
-                  ? "Set ARK_API_KEY and ARK_MODEL in .env before using the Playground."
+                {!system?.modelConfigured
+                  ? "Set MODEL_ID and MODEL_API_KEY in .env before using the Playground."
                   : system.runtimeProvider === "container"
                     ? "The local container engine or Agent Runtime image is unavailable. Rerun npm run poc."
                     : "Codex CLI was not found. Use the Docker image or install @openai/codex."}
@@ -601,6 +624,7 @@ export default function App() {
           </div>
         )}
       </main>
+      )}
 
       {showCreate && (
         <div className="modal-backdrop" onMouseDown={() => setShowCreate(false)}>

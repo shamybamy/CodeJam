@@ -12,5 +12,5 @@ fi
 mkdir -p data workspaces codex-home
 
 echo "Next:"
-echo "  1. Fill ARK_API_KEY and ARK_MODEL in .env"
+echo "  1. Start Ollama and pull qwen3:8b (or configure MODEL_PROVIDER=ark)"
 echo "  2. Run: docker compose up --build"

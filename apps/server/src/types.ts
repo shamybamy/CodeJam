@@ -68,15 +68,49 @@ export interface RunnerResult {
   usage: RunUsage | null;
 }
 
+export type RunnerLifecycleEvent =
+  | {
+      type: "runtime.started" | "runtime.heartbeat" | "run.tool_activity";
+      occurredAt: string;
+      origin: "runtime" | "control-plane";
+      payload: Record<string, unknown>;
+    }
+  | {
+      type: "runtime.exited";
+      occurredAt: string;
+      origin: "runtime" | "control-plane";
+      payload: Record<string, unknown> & {
+        exitCode: number | null;
+        signal: string | null;
+      };
+    };
+
 export interface RunnerRequest {
+  runId: string;
   agentId: string;
+  runtimeInstanceId: string;
   workspacePath: string;
   prompt: string;
   threadId: string | null;
+  onLifecycleEvent?:
+    | ((event: RunnerLifecycleEvent) => Promise<void> | void)
+    | undefined;
+}
+
+export interface RunnerCancellation {
+  runId: string;
+  agentId: string;
+  runtimeInstanceId: string;
 }
 
 export interface AgentRunner {
   run(request: RunnerRequest): Promise<RunnerResult>;
-  cancel(agentId: string): Promise<boolean>;
+  cancel(target: RunnerCancellation): Promise<boolean>;
   isAvailable(): Promise<boolean>;
+  /**
+   * Freezes the Runtime so its heartbeat genuinely stops. Only Runtimes that
+   * own a container can honour this; the demo control reports "unsupported"
+   * for every other provider instead of faking a missed heartbeat.
+   */
+  pause?(target: RunnerCancellation): Promise<boolean>;
 }

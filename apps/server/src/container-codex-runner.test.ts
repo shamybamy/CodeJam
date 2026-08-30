@@ -3,6 +3,8 @@ import { loadConfig } from "./config.js";
 import {
   buildContainerRunArgs,
   containerName,
+  parseRuntimeControlLine,
+  RUNTIME_CONTROL_PREFIX,
 } from "./container-codex-runner.js";
 
 describe("Container Codex runner", () => {
@@ -20,7 +22,9 @@ describe("Container Codex runner", () => {
     });
     const args = buildContainerRunArgs(
       {
+        runId: "00000000-0000-4000-8000-000000000001",
         agentId: "agent/unsafe",
+        runtimeInstanceId: "test-instance",
         workspacePath: "/tmp/agent-workspace",
         prompt: "write a small program",
         threadId: null,
@@ -38,7 +42,12 @@ describe("Container Codex runner", () => {
     expect(args).toContain("workspace-write");
     expect(args).toContain("/workspace");
     expect(args).toContain("io.codejam.instance-id=test-instance");
+    expect(args).toContain("io.codejam.runtime-instance-id=test-instance");
+    expect(args).toContain("io.codejam.run-id=00000000-0000-4000-8000-000000000001");
+    expect(args).toContain("/opt/codejam/agent-runtime-wrapper.mjs");
     expect(args).toContain("keep-id");
+    expect(args).toContain("MODEL_API_KEY");
+    expect(args).not.toContain("ARK_API_KEY");
     expect(args).not.toContain("secret-that-must-not-appear-in-argv");
   });
 
@@ -50,7 +59,9 @@ describe("Container Codex runner", () => {
     });
     const args = buildContainerRunArgs(
       {
+        runId: "00000000-0000-4000-8000-000000000002",
         agentId: "agent",
+        runtimeInstanceId: config.runtimeInstanceId,
         workspacePath: "/tmp/workspace",
         prompt: "continue",
         threadId: "thread-123",
@@ -59,5 +70,29 @@ describe("Container Codex runner", () => {
     );
     expect(args.slice(-3)).toEqual(["resume", "thread-123", "continue"]);
     expect(args).not.toContain("keep-id");
+  });
+
+  it("recognizes only structured Runtime control lines", () => {
+    const event = parseRuntimeControlLine(
+      RUNTIME_CONTROL_PREFIX +
+        JSON.stringify({
+          type: "runtime.heartbeat",
+          occurredAt: "2026-08-30T10:00:00.000Z",
+          runId: "run-1",
+          agentId: "agent-1",
+          runtimeInstanceId: "runtime-1",
+          payload: { sequence: 2 },
+        }),
+    );
+
+    expect(event).toMatchObject({
+      type: "runtime.heartbeat",
+      runId: "run-1",
+      payload: { sequence: 2 },
+    });
+    expect(parseRuntimeControlLine("normal stderr")).toBeNull();
+    expect(
+      parseRuntimeControlLine("[child-output] " + RUNTIME_CONTROL_PREFIX + "{}"),
+    ).toBeNull();
   });
 });

@@ -39,9 +39,10 @@ export interface AgentRun {
 }
 
 export interface SystemInfo {
-  arkConfigured: boolean;
-  arkBaseUrl: string;
-  arkModel: string | null;
+  modelConfigured: boolean;
+  modelProvider: "ollama" | "ark";
+  modelBaseUrl: string;
+  modelId: string | null;
   codexAvailable: boolean;
   codexSandboxMode: string;
   runtimeProvider: "local-process" | "container";

@@ -1,4 +1,11 @@
 import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type {
+  SupervisorAlert,
+  SupervisorChatReply,
+  SupervisorEventRecord,
+  SupervisorOverviewResponse,
+  SupervisorRun,
+} from "./supervisor-types";
 
 export class ApiError extends Error {
   constructor(
@@ -78,4 +85,37 @@ export const api = {
       },
     ),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
+
+  supervisorOverview: () =>
+    request<SupervisorOverviewResponse>("/api/supervisor/overview"),
+  supervisorRuns: () =>
+    request<{ runs: SupervisorRun[] }>("/api/supervisor/runs"),
+  supervisorRun: (runId: string) =>
+    request<{ run: SupervisorRun; alerts: SupervisorAlert[] }>(
+      "/api/supervisor/runs/" + runId,
+    ),
+  supervisorRunEvents: (runId: string) =>
+    request<{ events: SupervisorEventRecord[] }>(
+      "/api/supervisor/runs/" + runId + "/events",
+    ),
+  supervisorAlerts: () =>
+    request<{ alerts: SupervisorAlert[] }>("/api/supervisor/alerts"),
+  supervisorCancel: (runId: string, reason?: string) =>
+    request<{ commandId: string; runId: string; published: boolean }>(
+      "/api/supervisor/runs/" + runId + "/cancel",
+      {
+        method: "POST",
+        body: JSON.stringify(reason ? { reason } : {}),
+      },
+    ),
+  supervisorSimulateStall: (runId: string) =>
+    request<{ runId: string; pausedAt: string; stallAfterMs: number }>(
+      "/api/supervisor/runs/" + runId + "/simulate-stall",
+      { method: "POST" },
+    ),
+  supervisorChat: (question: string, runId?: string) =>
+    request<SupervisorChatReply>("/api/supervisor/chat", {
+      method: "POST",
+      body: JSON.stringify(runId ? { question, runId } : { question }),
+    }),
 };
