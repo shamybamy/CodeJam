@@ -90,6 +90,31 @@ function seedSuspiciousRun(ledger: SupervisorLedger): {
   return { runId, eventId: event.eventId };
 }
 
+function seedTerminalRun(
+  ledger: SupervisorLedger,
+  state: "completed" | "failed" | "cancelled",
+  occurredAt: string,
+): string {
+  const runId = randomUUID();
+  ledger.recordEvent(
+    createSupervisorEvent({
+      type: `run.${state}`,
+      occurredAt,
+      runId,
+      agentId: randomUUID(),
+      runtimeInstanceId: "default",
+      source: "control-plane",
+      severity: state === "completed" ? "info" : "warning",
+      summary: `Agent run ${state}`,
+      payload:
+        state === "cancelled"
+          ? { reason: "Operator requested cancellation" }
+          : {},
+    }),
+  );
+  return runId;
+}
+
 async function makeChatApp(
   ledger: SupervisorLedger,
   model: ScriptedModel,
@@ -201,6 +226,111 @@ describe("operator chatbot", () => {
     await app.close();
   });
 
+  it("resolves the most recent cancelled run instead of the selected run", async () => {
+    const ledger = await makeLedger();
+    seedTerminalRun(ledger, "cancelled", "2026-08-30T10:00:00.000Z");
+    const latestCancelledRunId = seedTerminalRun(
+      ledger,
+      "cancelled",
+      "2026-08-30T11:00:00.000Z",
+    );
+    const selectedRunId = seedTerminalRun(
+      ledger,
+      "completed",
+      "2026-08-30T12:00:00.000Z",
+    );
+    const model = new ScriptedModel([
+      {
+        content: `Run ${latestCancelledRunId.slice(0, 8)} was cancelled by the operator.`,
+      },
+    ]);
+    const app = await makeChatApp(ledger, model);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/supervisor/chat",
+      payload: {
+        question: "What happened to the most recent cancelled run?",
+        runId: selectedRunId,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.toolCalls).toEqual([
+      { tool: "listRuns", arguments: { state: "cancelled", limit: 1 } },
+      { tool: "getRunTimeline", arguments: { runId: latestCancelledRunId } },
+    ]);
+    expect(body.citations.length).toBeGreaterThan(0);
+    expect(
+      body.citations.every(
+        (citation: { runId: string }) => citation.runId === latestCancelledRunId,
+      ),
+    ).toBe(true);
+    expect(model.prompts).toHaveLength(1);
+    expect(model.prompts[0]).toContain(latestCancelledRunId);
+    expect(model.prompts[0]).not.toContain(selectedRunId);
+    await app.close();
+  });
+
+  it("treats zero unhealthy runs as evidence instead of missing evidence", async () => {
+    const ledger = await makeLedger();
+    const failedRunId = seedTerminalRun(
+      ledger,
+      "failed",
+      "2026-08-30T11:00:00.000Z",
+    );
+    const selectedRunId = seedTerminalRun(
+      ledger,
+      "completed",
+      "2026-08-30T12:00:00.000Z",
+    );
+    const model = new ScriptedModel([
+      {
+        content:
+          "No active runs are unhealthy right now: there are no stalled runs. " +
+          `Run ${failedRunId.slice(0, 8)} failed previously and is now terminal.`,
+      },
+    ]);
+    const app = await makeChatApp(ledger, model);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/supervisor/chat",
+      payload: {
+        question: "Which runs are unhealthy right now?",
+        runId: selectedRunId,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.answer).toBe(
+      "No active runs are unhealthy right now: there are no stalled runs. " +
+        `Run ${failedRunId.slice(0, 8)} failed previously and is now terminal.`,
+    );
+    expect(body.answer).not.toMatch(/listRuns|may refer|terminal means unhealthy/i);
+    expect(body.toolCalls).toEqual([
+      { tool: "getSystemOverview", arguments: {} },
+      { tool: "listRuns", arguments: { health: "stalled", limit: 20 } },
+      { tool: "listRuns", arguments: { state: "failed", limit: 20 } },
+    ]);
+    expect(
+      body.citations.some(
+        (citation: { runId: string }) => citation.runId === failedRunId,
+      ),
+    ).toBe(true);
+    expect(model.prompts).toHaveLength(1);
+    expect(model.prompts[0]).toContain("currentlyStalledRuns");
+    expect(model.prompts[0]).toContain("historicalFailedRuns");
+    expect(model.prompts[0]).toContain(
+      "terminal does not mean currently unhealthy",
+    );
+    expect(model.prompts[0]).not.toContain('"tool":"listRuns"');
+    expect(model.prompts[0]).not.toContain(selectedRunId);
+    await app.close();
+  });
+
   it("falls back to the keyword plan when the model's tool returns nothing", async () => {
     const ledger = await makeLedger();
     seedSuspiciousRun(ledger);
@@ -299,11 +429,34 @@ describe("chat tool registry", () => {
     expect(plan[0]?.arguments).toEqual({ runId });
   });
 
-  it("plans health questions onto the overview tools", () => {
-    expect(planToolCalls("which runs are unhealthy?").map((call) => call.tool)).toEqual([
-      "getSystemOverview",
-      "listRuns",
-      "searchEvents",
+  it("lets a recent state query override the selected run", () => {
+    const selectedRunId = randomUUID();
+    expect(
+      planToolCalls(
+        "What happened to the most recent cancelled run?",
+        selectedRunId,
+      ),
+    ).toEqual([
+      { tool: "listRuns", arguments: { state: "cancelled", limit: 1 } },
+    ]);
+  });
+
+  it("lets a system-wide unhealthy query override the selected run", () => {
+    const selectedRunId = randomUUID();
+    expect(
+      planToolCalls("Which runs are unhealthy right now?", selectedRunId),
+    ).toEqual([
+      { tool: "getSystemOverview", arguments: {} },
+      { tool: "listRuns", arguments: { health: "stalled", limit: 20 } },
+      { tool: "listRuns", arguments: { state: "failed", limit: 20 } },
+    ]);
+  });
+
+  it("plans health questions onto current and historical health evidence", () => {
+    expect(planToolCalls("which runs are unhealthy?")).toEqual([
+      { tool: "getSystemOverview", arguments: {} },
+      { tool: "listRuns", arguments: { health: "stalled", limit: 20 } },
+      { tool: "listRuns", arguments: { state: "failed", limit: 20 } },
     ]);
   });
 

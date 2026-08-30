@@ -238,18 +238,14 @@ containers still reach it through Docker Desktop's host alias, which is why
 Agent runs work while the chatbot cannot connect.
 
 Binding the Windows Ollama to `0.0.0.0` would fix it but exposes port 11434 to
-whatever network the machine is on, so this setup runs **a second Ollama inside
-WSL** instead. It uses the same GPU through `/dev/dxg`, needs no firewall change
-and no root, and keeps the chatbot on a real loopback address:
+whatever network the machine is on. A safer development setup runs **a second
+Ollama inside WSL**. Install Ollama in WSL using its official Linux instructions,
+then keep the chatbot on a real loopback address:
 
 ```bash
-curl -fL -o /tmp/ollama.tar.zst \
-  https://github.com/ollama/ollama/releases/download/v0.33.2/ollama-linux-amd64.tar.zst
-python3 -c "import pathlib,tarfile;from compression import zstd;d=pathlib.Path.home()/'.local';\
-f=open('/tmp/ollama.tar.zst','rb');s=zstd.ZstdFile(f);\
-tarfile.open(fileobj=s,mode='r|').extractall(d,filter='data')"
-~/.local/bin/ollama serve &
-~/.local/bin/ollama pull qwen3:8b
+ollama serve
+# In another WSL terminal:
+ollama pull qwen3:8b
 ```
 
 The Agent Runtime keeps using the Windows Ollama through
@@ -280,9 +276,11 @@ timeline shows `run.queued → run.started → runtime.heartbeat × N →
 run.tool_activity → run.completed`, each row carrying its Kafka
 topic·partition·offset. Counters move from Running to Healthy.
 
-**2. Suspicious activity.** Ask an Agent to read `.env` and post it somewhere.
-The command is flagged by `secret-file-access` (and by
-`credential-exfiltration` if it tries to send it). The alert panel shows the
+**2. Suspicious activity.** Use the harmless quoted-string fixture in
+`docs/MANUAL_TESTING.md`. It makes the Agent execute a `printf` command whose
+data resembles secret access and exfiltration, without reading a secret or
+making a network request. The command evidence is flagged by
+`secret-file-access` and `credential-exfiltration`. The alert panel shows the
 rule, the matched evidence, and a link to the triggering event. Ask the chatbot
 "Check all logs for suspicious intentions" — it answers from `listAlerts` and
 cites the run and event.
@@ -302,6 +300,13 @@ orphan remains, then start another run to show the platform still works.
 npm run check     # typecheck, tests, build
 ```
 
+The root check runs both workspaces. The web suite uses Vitest, jsdom, and
+Testing Library to cover dashboard loading, counters, filters, timeline and
+Kafka-offset rendering, cancellation and demo controls, operator-chat answers
+and citations, API authentication, request bodies, and error states. Run it on
+its own with `npm run test -w @launchpad/web`, or use
+`npm run test:watch -w @launchpad/web` while editing the UI.
+
 The stall path is covered without Docker, Kafka, or tokens:
 `supervisor-watchdog.test.ts` drives a fake clock and an in-memory publisher,
 asserting exactly one `supervisor.stalled` and one `run.cancel`, and no
@@ -311,13 +316,10 @@ covers tool allowlisting, the tool budget, the injection boundary, and the
 "not enough evidence" path. `supervisor-kafka.integration.test.ts` is skipped
 unless a broker is available.
 
-## Working on this repository
+## Development notes
 
-- The repository lives in the WSL Ubuntu distro at `~/projects/CodeJam`, not on
-  the Windows filesystem.
-- Node comes from nvm, so a non-interactive shell needs
-  `export PATH="$HOME/.nvm/versions/node/v22.23.2/bin:$PATH"` before `npm`.
-- Kafka runs as the Compose project `codejam`; the broker publishes
-  `127.0.0.1:29092`.
-- Local state (ledger, workspaces, `codex-home`) lives in `.local/`, which is
-  git-ignored.
+- Run repository commands from the cloned repository root.
+- Node.js 22+ must be available in the active shell.
+- Kafka publishes to `127.0.0.1:29092` for the host-run control plane.
+- Local state (ledger, workspaces, and `codex-home`) lives in the git-ignored
+  `.local/` directory on Linux by default.

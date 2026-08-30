@@ -3,6 +3,7 @@ import type { AppConfig } from "./config.js";
 import type {
   SupervisorEventRecord,
   SupervisorLedger,
+  SupervisorRunState,
 } from "./supervisor-ledger.js";
 import { supervisorEventTypeSchema } from "./supervisor-contracts.js";
 import { toRunView } from "./supervisor-api.js";
@@ -256,6 +257,31 @@ export function findChatTool(name: string): SupervisorChatTool | null {
 }
 
 /**
+ * Recognises questions whose target must be resolved from the ledger rather
+ * than from the run currently selected in the dashboard.
+ */
+export function requestedRecentRunState(
+  question: string,
+): SupervisorRunState | null {
+  const text = question.toLowerCase();
+  if (!/\b(?:most\s+recent|latest|newest)\b/.test(text)) return null;
+  if (/\bcancell?ed\b|\bcancell?ation\b/.test(text)) return "cancelled";
+  if (/\bfailed\b|\bfailure\b/.test(text)) return "failed";
+  if (/\bcompleted\b|\bsucceeded\b|\bsuccessful\b/.test(text)) {
+    return "completed";
+  }
+  if (/\brunning\b|\bactive\b/.test(text)) return "running";
+  if (/\bqueued\b/.test(text)) return "queued";
+  return null;
+}
+
+/** A plural unhealthy-runs question is system-wide, not about the selected row. */
+export function requestsCurrentUnhealthyRuns(question: string): boolean {
+  const text = question.toLowerCase();
+  return /\bruns\b/.test(text) && /\b(?:unhealthy|stalled|stuck|hung)\b/.test(text);
+}
+
+/**
  * Keyword plan used when the model does not choose a valid tool. It keeps the
  * chatbot answering from evidence even with a small local model.
  */
@@ -267,7 +293,8 @@ export function planToolCalls(
   const uuid = question.match(
     /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
   )?.[0];
-  const target = uuid ?? runId;
+  const recentState = requestedRecentRunState(question);
+  const currentUnhealthyRuns = requestsCurrentUnhealthyRuns(question);
   const suspicious =
     /suspicious|malicious|attack|exfiltrat|secret|credential|escape|privilege|alert|dangerous|intent/.test(
       text,
@@ -282,6 +309,26 @@ export function planToolCalls(
     });
     return plan;
   }
+  if (recentState) {
+    plan.push({
+      tool: "listRuns",
+      arguments: { state: recentState, limit: 1 },
+    });
+    return plan;
+  }
+  if (currentUnhealthyRuns) {
+    plan.push({ tool: "getSystemOverview", arguments: {} });
+    plan.push({
+      tool: "listRuns",
+      arguments: { health: "stalled", limit: 20 },
+    });
+    plan.push({
+      tool: "listRuns",
+      arguments: { state: "failed", limit: 20 },
+    });
+    return plan;
+  }
+  const target = uuid ?? runId;
   if (target) {
     plan.push({ tool: "getRunHealth", arguments: { runId: target } });
     plan.push({ tool: "getRunTimeline", arguments: { runId: target } });
