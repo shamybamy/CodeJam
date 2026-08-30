@@ -232,10 +232,30 @@ The control plane is somewhere else, so unless `SUPERVISOR_CHAT_BASE_URL` is
 set, the chat client probes `127.0.0.1`, the container alias, and the IPv4
 default gateway, then keeps whichever answers.
 
-On Windows with the control plane in WSL, Ollama listens on `127.0.0.1` by
-default and **no** candidate can reach it. Set `OLLAMA_HOST=0.0.0.0` on Windows
-and restart Ollama; the gateway candidate then resolves. Keep the firewall rule
-for port 11434 private-only, because that binding is reachable from the LAN.
+On Windows with the control plane in WSL there is a wrinkle: a desktop Ollama
+listens on `127.0.0.1` only, which the WSL distro cannot reach. Docker
+containers still reach it through Docker Desktop's host alias, which is why
+Agent runs work while the chatbot cannot connect.
+
+Binding the Windows Ollama to `0.0.0.0` would fix it but exposes port 11434 to
+whatever network the machine is on, so this setup runs **a second Ollama inside
+WSL** instead. It uses the same GPU through `/dev/dxg`, needs no firewall change
+and no root, and keeps the chatbot on a real loopback address:
+
+```bash
+curl -fL -o /tmp/ollama.tar.zst \
+  https://github.com/ollama/ollama/releases/download/v0.33.2/ollama-linux-amd64.tar.zst
+python3 -c "import pathlib,tarfile;from compression import zstd;d=pathlib.Path.home()/'.local';\
+f=open('/tmp/ollama.tar.zst','rb');s=zstd.ZstdFile(f);\
+tarfile.open(fileobj=s,mode='r|').extractall(d,filter='data')"
+~/.local/bin/ollama serve &
+~/.local/bin/ollama pull qwen3:8b
+```
+
+The Agent Runtime keeps using the Windows Ollama through
+`host.docker.internal`; only the control plane's chatbot uses the WSL one. Start
+`ollama serve` in WSL before a demo, or the chat panel returns 503 with the list
+of addresses it tried.
 
 ## Running it
 

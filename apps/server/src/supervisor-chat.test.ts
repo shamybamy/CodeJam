@@ -8,6 +8,7 @@ import { loadConfig } from "./config.js";
 import { createSupervisorEvent } from "./supervisor-contracts.js";
 import { SupervisorLedger } from "./supervisor-ledger.js";
 import {
+  enforceAnswerStyle,
   registerSupervisorChat,
   stripReasoning,
   type SupervisorChatModel,
@@ -200,6 +201,34 @@ describe("operator chatbot", () => {
     await app.close();
   });
 
+  it("falls back to the keyword plan when the model's tool returns nothing", async () => {
+    const ledger = await makeLedger();
+    seedSuspiciousRun(ledger);
+    // A valid tool, but scoped to a run that has no events: an unproductive
+    // choice must not be reported as an empty ledger.
+    const model = new ScriptedModel([
+      { toolCalls: [{ name: "getRunTimeline", arguments: { runId: randomUUID() } }] },
+      { content: "One run tripped secret-file-access." },
+    ]);
+    const app = await makeChatApp(ledger, model);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/supervisor/chat",
+      payload: { question: "Check all logs for suspicious intentions." },
+    });
+
+    const body = response.json();
+    expect(body.answer).toBe("One run tripped secret-file-access.");
+    expect(body.toolCalls.map((call: { tool: string }) => call.tool)).toEqual([
+      "getRunTimeline",
+      "listAlerts",
+      "searchEvents",
+    ]);
+    expect(body.citations.length).toBeGreaterThan(0);
+    await app.close();
+  });
+
   it("refuses to answer when the ledger holds no evidence", async () => {
     const ledger = await makeLedger();
     const model = new ScriptedModel([
@@ -282,5 +311,62 @@ describe("chat tool registry", () => {
     expect(stripReasoning("<think>hmm</think>Two runs stalled.")).toBe(
       "Two runs stalled.",
     );
+  });
+});
+
+describe("answer style", () => {
+  it("removes the markdown a chatty model adds", () => {
+    const decorated = [
+      "## Summary",
+      "1. **Command executed**: cat .env",
+      "- *flagged* by secret-file-access",
+      "```bash",
+      "cat .env",
+      "```",
+    ].join("\n");
+    const answer = enforceAnswerStyle(decorated);
+    expect(answer).not.toMatch(/[#*]/);
+    expect(answer).toContain("Command executed: cat .env");
+    expect(answer).toContain("flagged by secret-file-access");
+    // A list with its markers removed still reads as a list, so it is collapsed
+    // into the single paragraph the prompt asks for.
+    expect(answer).not.toContain("\n");
+  });
+
+  it("cuts an over-long answer at the last whole sentence", () => {
+    const long =
+      "Run ab0e0c3a stalled. " + "The watchdog cancelled it once. ".repeat(40);
+    const answer = enforceAnswerStyle(long, 20);
+    expect(answer.split(/\s+/).length).toBeLessThanOrEqual(20);
+    expect(answer.endsWith(".")).toBe(true);
+  });
+
+  it("keeps a short answer untouched", () => {
+    const short = "Run ab0e0c3a is stalled with no alerts recorded.";
+    expect(enforceAnswerStyle(short)).toBe(short);
+  });
+
+  it("applies the style limit to what the endpoint returns", async () => {
+    const ledger = await makeLedger();
+    seedSuspiciousRun(ledger);
+    const model = new ScriptedModel([
+      { toolCalls: [{ name: "listAlerts", arguments: {} }] },
+      {
+        content:
+          "### Findings\n\n1. **Run c16764a7** tripped *secret-file-access*.",
+      },
+    ]);
+    const app = await makeChatApp(ledger, model);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/supervisor/chat",
+      payload: { question: "Anything suspicious?" },
+    });
+
+    expect(response.json().answer).toBe(
+      "Findings Run c16764a7 tripped secret-file-access.",
+    );
+    await app.close();
   });
 });

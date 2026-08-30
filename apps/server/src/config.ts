@@ -83,7 +83,7 @@ const envSchema = z.object({
     .number()
     .int()
     .min(1_000)
-    .default(90_000),
+    .default(120_000),
   SUPERVISOR_CHAT_MAX_TOOL_CALLS: z.coerce
     .number()
     .int()
