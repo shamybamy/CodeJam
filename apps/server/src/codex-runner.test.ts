@@ -5,7 +5,9 @@ describe("Codex runner protocol", () => {
   it("builds a new-session invocation", () => {
     const args = buildCodexArgs(
       {
+        runId: "run-1",
         agentId: "agent",
+        runtimeInstanceId: "test-instance",
         workspacePath: "/tmp/workspace",
         prompt: "build a calculator",
         threadId: null,
@@ -27,7 +29,9 @@ describe("Codex runner protocol", () => {
   it("resumes a stored Codex thread", () => {
     const args = buildCodexArgs(
       {
+        runId: "run-2",
         agentId: "agent",
+        runtimeInstanceId: "test-instance",
         workspacePath: "/tmp/workspace",
         prompt: "add tests",
         threadId: "thread-123",

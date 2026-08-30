@@ -31,6 +31,22 @@ Volcengine ECS.
 - Disposable Docker, Colima, or Podman container for each local turn
 - Docker and Terraform deployment paths for Volcengine ECS
 
+## Run supervisor middleware
+
+This fork adds a Kafka-backed run supervisor on top of the baseline platform:
+every Agent run publishes structured events to a local Kafka broker, a SQLite
+ledger reconciles them into queryable run state, a watchdog recovers Runtimes
+that stop heartbeating, deterministic rules flag suspicious tool use, and a
+read-only operator chatbot answers questions from the stored evidence. It runs
+entirely locally against Ollama, with no paid service.
+
+```bash
+ENABLE_DEMO_CONTROLS=true npm run poc
+```
+
+See [docs/SUPERVISOR.md](docs/SUPERVISOR.md) for the architecture, event
+contracts, rule set, API reference, and the demo runbook.
+
 ## Requirements
 
 - Node.js 22+
@@ -240,6 +256,7 @@ docker compose config
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Kafka run supervisor](docs/SUPERVISOR.md)
 - [Local POC](docs/LOCAL_POC.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Hackathon extension guide](docs/HACKATHON_EXTENSION_GUIDE.md)

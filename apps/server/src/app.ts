@@ -7,6 +7,11 @@ import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import type { AgentService } from "./agent-service.js";
+import {
+  registerSupervisorRoutes,
+  type SupervisorApiGateway,
+} from "./supervisor-api.js";
+import { registerSupervisorChat } from "./supervisor-chat.js";
 
 const agentIdParams = z.object({ id: z.string().uuid() });
 const runIdParams = z.object({ id: z.string().uuid() });
@@ -26,6 +31,7 @@ const messageBody = z.object({
 export async function createApp(
   config: AppConfig,
   service: AgentService,
+  supervisor: SupervisorApiGateway | null = null,
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
@@ -127,6 +133,9 @@ export async function createApp(
     const { id } = runIdParams.parse(request.params);
     return { run: service.getRun(id) };
   });
+
+  await registerSupervisorRoutes(app, config, service, supervisor);
+  await registerSupervisorChat(app, { config, supervisor });
 
   if (config.nodeEnv === "production") {
     const webRoot = fileURLToPath(new URL("../../web/dist", import.meta.url));

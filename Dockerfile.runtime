@@ -27,6 +27,8 @@ ENV CODEX_HOME=/codex-home
 ENV HOME=/tmp
 ENV NO_COLOR=1
 
+COPY runtime/agent-runtime-wrapper.mjs /opt/codejam/agent-runtime-wrapper.mjs
+
 WORKDIR /workspace
 
 CMD ["codex", "--version"]

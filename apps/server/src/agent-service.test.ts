@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
 import { JsonStore } from "./store.js";
+import type { SupervisorEvent } from "./supervisor-contracts.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
@@ -35,7 +36,10 @@ afterEach(async () => {
   );
 });
 
-async function makeService(runner: AgentRunner = new FakeRunner()): Promise<AgentService> {
+async function makeService(
+  runner: AgentRunner = new FakeRunner(),
+  publishedEvents?: SupervisorEvent[],
+): Promise<AgentService> {
   const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
   temporaryDirectories.push(root);
   const config = loadConfig({
@@ -51,6 +55,9 @@ async function makeService(runner: AgentRunner = new FakeRunner()): Promise<Agen
     new JsonStore(path.join(root, "data", "db.json")),
     new WorkspaceManager(path.join(root, "workspaces")),
     runner,
+    publishedEvents
+      ? { publishEvent: async (event) => void publishedEvents.push(event) }
+      : undefined,
   );
   await service.initialize();
   return service;
@@ -129,5 +136,54 @@ describe("Agent lifecycle", () => {
 
     finish({ output: "done", threadId: "thread", usage: null });
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
+  it("publishes a correlated Runtime lifecycle without exposing control lines", async () => {
+    const publishedEvents: SupervisorEvent[] = [];
+    const runner: AgentRunner = {
+      run: async (request) => {
+        await request.onLifecycleEvent?.({
+          type: "runtime.started",
+          occurredAt: "2026-08-30T10:00:00.000Z",
+          origin: "runtime",
+          payload: { pid: 42 },
+        });
+        await request.onLifecycleEvent?.({
+          type: "runtime.heartbeat",
+          occurredAt: "2026-08-30T10:00:02.000Z",
+          origin: "runtime",
+          payload: { sequence: 1 },
+        });
+        await request.onLifecycleEvent?.({
+          type: "runtime.exited",
+          occurredAt: "2026-08-30T10:00:03.000Z",
+          origin: "runtime",
+          payload: { exitCode: 0, signal: null },
+        });
+        return { output: "done", threadId: "thread", usage: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    const service = await makeService(runner, publishedEvents);
+    const agent = await service.createAgent({ name: "Observed" });
+    const { run } = await service.sendMessage(agent.id, "small task");
+
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    expect(publishedEvents.map((event) => event.type)).toEqual([
+      "run.queued",
+      "run.started",
+      "runtime.heartbeat",
+      "runtime.exited",
+      "run.completed",
+    ]);
+    expect(
+      publishedEvents.every(
+        (event) =>
+          event.runId === run.id &&
+          event.agentId === agent.id &&
+          event.runtimeInstanceId === "default",
+      ),
+    ).toBe(true);
   });
 });

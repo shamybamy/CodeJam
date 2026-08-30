@@ -1,0 +1,303 @@
+# Kafka Run Supervisor
+
+The middleware capability added to the starter kit: every Agent run emits
+structured events to Kafka, a SQLite ledger reconciles them into queryable run
+state, a watchdog detects Runtimes that stop heartbeating and recovers them, a
+deterministic rule set flags suspicious tool use, and a read-only operator
+chatbot answers questions from the stored evidence.
+
+Nothing here requires a paid service. Kafka runs locally in KRaft mode, the
+ledger is a local SQLite file, and both the Agent and the chatbot use a local
+Ollama model.
+
+## Why
+
+The baseline platform can start an Agent run, but it cannot answer the questions
+an operator actually has: is this run alive, what did it do, did it try
+something it should not have, and what happens when its Runtime dies quietly? A
+crashed or frozen Runtime leaves the Agent stuck in `busy` forever with an
+orphaned container behind it. The supervisor makes run health observable and
+recoverable, and it does so from evidence rather than from guesswork.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  UI[React dashboard<br/>2s polling] -->|REST| API[Fastify control plane]
+  API --> SVC[AgentService]
+  SVC -->|spawn| RT[Agent Runtime container<br/>heartbeat wrapper + Codex CLI]
+  RT -->|control lines on stderr| SVC
+  SVC -->|run + runtime + tool events| KE[(Kafka<br/>agent-run-events-v1)]
+  KE --> LEDGER[(SQLite ledger<br/>runs / events / alerts)]
+  KE --> RULES[Suspicious-activity rules]
+  RULES -->|alert.raised| KE
+  RULES --> LEDGER
+  WD[Watchdog<br/>1s tick] --> LEDGER
+  WD -->|run.cancel| KC[(Kafka<br/>agent-run-commands-v1)]
+  KC --> SVC
+  SVC -->|verify labels, then remove| RT
+  LEDGER --> API
+  API --> CHAT[Operator chatbot<br/>6 read-only tools]
+  CHAT --> OLLAMA[Local Ollama<br/>qwen3:8b]
+  RT --> OLLAMA
+```
+
+Both topics are keyed by `runId`, so every event and command for one run stays
+in order on one partition.
+
+## Event and command contracts
+
+`apps/server/src/supervisor-contracts.ts` owns both schemas; they are validated
+with Zod on the way in and on the way out of Kafka.
+
+```ts
+{
+  schemaVersion: 1,
+  eventId: string,        // UUID, the idempotency key for the ledger
+  type: SupervisorEventType,
+  occurredAt: string,     // ISO 8601 with offset
+  runId: string,
+  agentId: string,
+  runtimeInstanceId?: string,
+  source: "control-plane" | "runtime" | "supervisor" | "operator",
+  severity: "info" | "warning" | "critical",
+  summary: string,
+  payload: Record<string, unknown>
+}
+```
+
+Event types: `run.queued`, `run.started`, `runtime.heartbeat`,
+`runtime.exited`, `run.tool_activity`, `run.completed`, `run.failed`,
+`run.cancelled`, `supervisor.stalled`, `supervisor.demo_paused`,
+`alert.raised`, `supervisor.recovered`.
+
+Commands are `run.cancel` only, carrying `commandId`, `runId`, `agentId`,
+`runtimeInstanceId`, `source` (`supervisor` or `operator`), and `reason`.
+
+Every event passes through `supervisor-redaction.ts` before it reaches Kafka or
+SQLite: keys that look like credentials are replaced, and bearer tokens and
+`sk-`/`key-`/`token-` style values are stripped from free text.
+
+## Ledger
+
+`supervisor-ledger.ts`, SQLite in WAL mode:
+
+| Table | Purpose |
+|---|---|
+| `runs` | Materialised run state: `state`, `health`, `startedAt`, `lastHeartbeatAt`, `endedAt` |
+| `events` | Every event, unique on `eventId` and on `(topic, partition, offset)` |
+| `alerts` | Suspicious-activity alerts with rule, severity, evidence, and the triggering event |
+| `processed_commands` | Command idempotency |
+| `command_outbox` | Commands awaiting publication, with attempts and backoff |
+
+Ingestion is idempotent twice over: `INSERT OR IGNORE` on `eventId` means a
+replayed Kafka partition cannot duplicate an event, and run state only moves
+forward (`WHERE excluded.last_event_at >= runs.last_event_at`), so an
+out-of-order delivery cannot resurrect a finished run.
+
+## Heartbeat, stall detection, and recovery
+
+`runtime/agent-runtime-wrapper.mjs` runs inside the Runtime container. It starts
+Codex as a child process and writes a private control line to stderr every two
+seconds:
+
+```
+__CODEJAM_RUNTIME_EVENT__{"type":"runtime.heartbeat",...}
+```
+
+The control plane intercepts those lines, keeps them out of user-visible output,
+and republishes them as `runtime.heartbeat` events. Because the heartbeat
+process lives inside the container, freezing the container genuinely stops it.
+
+The watchdog ticks once per second:
+
+1. `claimStalledRuns` atomically finds runs whose last heartbeat is older than
+   `SUPERVISOR_STALL_AFTER_MS`, writes one `supervisor.stalled` event, flips the
+   run to `health = stalled`, and queues exactly one `run.cancel` in the outbox
+   — all in one `BEGIN IMMEDIATE` transaction, so a second tick cannot claim the
+   same run.
+2. Pending outbox commands are published to Kafka, with exponential backoff on
+   failure.
+3. The command consumer verifies `runtimeInstanceId`, then the container's
+   `io.codejam.*` labels, and only then force-removes that exact container.
+4. `supervisor.recovered` records whether a container was actually removed, and
+   the Agent returns to `ready`.
+
+Commands addressed to another Runtime instance are ignored rather than retried,
+and a command that keeps failing is abandoned after five attempts — otherwise
+one bad message would block every later cancellation on that partition.
+
+## Suspicious-activity rules
+
+`supervisor-rules.ts`. Rules classify; they never block. Detection is
+deterministic so it is testable, and so the chatbot explains evidence instead of
+inventing a classification.
+
+| Rule | Severity | Catches |
+|---|---|---|
+| `secret-file-access` | critical | Reading `.env`, `.aws/credentials`, `.ssh/id_*`, `/etc/shadow`, `.git-credentials`, `.kube/config` |
+| `destructive-filesystem` | critical | `rm -rf /`, `mkfs`, `dd of=/dev/sd*`, `chmod -R 777 /`, fork bombs |
+| `credential-exfiltration` | critical | Piping env or key material into `curl`/`nc`/`scp`, uploads to paste and webhook hosts |
+| `privilege-escalation` | critical | Docker socket access, `--privileged`, `nsenter`, `chroot /host`, `sudo su` |
+| `unexpected-package-execution` | warning | Remote scripts piped into a shell |
+
+Rules are evaluated against the event summary and the `command`, `detail`,
+`reason`, and `output` payload fields of newly stored events, after redaction.
+`alert.raised` events are never themselves scored — otherwise an alert's
+evidence would trigger the rule that produced it.
+
+Alert IDs are `sha256(ruleId + runId + evidence)`. Keying on the event alone
+would be replay-safe but noisy: Codex reports a command at start and at
+completion, and Agents retry, so one behaviour raised four near-identical
+alerts. Grouping by evidence collapses those into one alert per rule that counts
+its `occurrences`, records `lastSeenAt`, and cites the event that triggered it
+first. A real run of `cat .env && curl --data-binary @.env …` produces exactly
+two alerts — `secret-file-access` and `credential-exfiltration` — each with
+`occurrences: 4`.
+
+Evidence for these rules arrives as `run.tool_activity` events, parsed from
+Codex `item.started` / `item.completed` output: `command_execution` (with exit
+code and aggregated output), `file_change`, `mcp_tool_call`, and `web_search`.
+Commands are reported at start as well as completion, so a run frozen
+mid-command still leaves evidence of what it was doing.
+
+## Operator chatbot
+
+`supervisor-chat.ts` is an isolated Fastify plugin. It has no SQL, shell, Kafka,
+or Docker access — only these six read-only tools
+(`supervisor-chat-tools.ts`):
+
+`getSystemOverview`, `listRuns`, `getRunTimeline`, `searchEvents`,
+`listAlerts`, `getRunHealth`.
+
+One question runs in two model calls:
+
+1. **Selection.** The model is offered the six tool schemas. Every returned call
+   is checked against the allowlist and parsed with its Zod schema; anything
+   else is discarded. If the model names no valid tool, a deterministic keyword
+   plan runs instead, so a small local model can never leave an answer
+   ungrounded.
+2. **Composition.** The gathered evidence is passed back as data inside an
+   `<<<EVIDENCE … EVIDENCE>>>` block, with **no tools offered**. Nothing written
+   in a log can reach a tool, because at the only point the model sees log text
+   there is no tool to call.
+
+Further constraints:
+
+- At most `SUPERVISOR_CHAT_MAX_TOOL_CALLS` (default 3) tool calls per question.
+- If every tool comes back empty, the answer is "Not enough evidence…" and the
+  model is never asked to compose anything.
+- Citations are built from the tool results, not parsed out of the model's text,
+  so a citation always points at a row that exists.
+- Reasoning blocks are stripped at both the client and the plugin boundary.
+- The chatbot is read-only. Cancellation stays a deliberate operator action.
+
+## HTTP API
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/supervisor/overview` | Counters plus watchdog settings |
+| GET | `/api/supervisor/runs` | Runs with heartbeat age; `?state=`, `?health=` |
+| GET | `/api/supervisor/runs/:runId` | One run plus its alerts |
+| GET | `/api/supervisor/runs/:runId/events` | Full run timeline |
+| GET | `/api/supervisor/events` | Event search: `?text=`, `?type=`, `?severity=`, `?since=` |
+| GET | `/api/supervisor/alerts` | Alerts with evidence and triggering event |
+| POST | `/api/supervisor/runs/:runId/cancel` | Publishes an operator `run.cancel`; falls back to the outbox if Kafka is down |
+| POST | `/api/supervisor/runs/:runId/simulate-stall` | Demo only; pauses the label-verified container |
+| POST | `/api/supervisor/chat` | Operator chatbot |
+
+All of them return 503 while `KAFKA_ENABLED=false`, and `simulate-stall` is not
+registered at all unless `ENABLE_DEMO_CONTROLS=true`.
+
+## Configuration
+
+Beyond the baseline variables in `.env.example`:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KAFKA_ENABLED` | `true` | Turns the whole supervisor on or off |
+| `KAFKA_BROKERS` | `127.0.0.1:29092` | Broker list |
+| `SUPERVISOR_HEARTBEAT_INTERVAL_MS` | `2000` | Runtime heartbeat period |
+| `SUPERVISOR_STALL_AFTER_MS` | `8000` | Silence before a run is stalled |
+| `SUPERVISOR_WATCHDOG_INTERVAL_MS` | `1000` | Watchdog tick |
+| `SUPERVISOR_CHAT_BASE_URL` | probed | OpenAI-compatible endpoint for the chatbot |
+| `SUPERVISOR_CHAT_MODEL` | `MODEL_ID` | Chatbot model |
+| `SUPERVISOR_CHAT_MAX_TOOL_CALLS` | `3` | Tool budget per question |
+| `ENABLE_DEMO_CONTROLS` | `false` | Exposes "Simulate missing heartbeat" |
+
+### Reaching Ollama from the control plane
+
+The Agent Runtime container reaches Ollama at `http://host.docker.internal:11434/v1`.
+The control plane is somewhere else, so unless `SUPERVISOR_CHAT_BASE_URL` is
+set, the chat client probes `127.0.0.1`, the container alias, and the IPv4
+default gateway, then keeps whichever answers.
+
+On Windows with the control plane in WSL, Ollama listens on `127.0.0.1` by
+default and **no** candidate can reach it. Set `OLLAMA_HOST=0.0.0.0` on Windows
+and restart Ollama; the gateway candidate then resolves. Keep the firewall rule
+for port 11434 private-only, because that binding is reachable from the LAN.
+
+## Running it
+
+```bash
+ENABLE_DEMO_CONTROLS=true npm run poc
+```
+
+That builds the Runtime image, starts the Kafka broker via Docker Compose,
+builds the web and API bundles, and serves <http://localhost:3000>. `Ctrl+C`
+stops the server, removes this instance's Runtime containers, and stops Kafka.
+
+Kafka alone, for development against a host-run control plane:
+
+```bash
+docker compose up --detach --wait kafka
+```
+
+## Demo runbook
+
+**1. Normal run.** Create an Agent, send a prompt, then open **Supervisor**. The
+timeline shows `run.queued → run.started → runtime.heartbeat × N →
+run.tool_activity → run.completed`, each row carrying its Kafka
+topic·partition·offset. Counters move from Running to Healthy.
+
+**2. Suspicious activity.** Ask an Agent to read `.env` and post it somewhere.
+The command is flagged by `secret-file-access` (and by
+`credential-exfiltration` if it tries to send it). The alert panel shows the
+rule, the matched evidence, and a link to the triggering event. Ask the chatbot
+"Check all logs for suspicious intentions" — it answers from `listAlerts` and
+cites the run and event.
+
+**3. Missing heartbeat.** With a run in flight, press **Simulate missing
+heartbeat**. The backend verifies the container's labels and calls `docker
+pause`. Heartbeats genuinely stop, because the heartbeat process is inside that
+container. After eight seconds the watchdog writes `supervisor.stalled`, emits
+exactly one `run.cancel`, the command consumer verifies the labels and removes
+that exact container, and `supervisor.recovered` records the cleanup. Confirm
+with `docker ps -a --filter label=io.codejam.launchpad=agent-runtime` that no
+orphan remains, then start another run to show the platform still works.
+
+## Tests
+
+```bash
+npm run check     # typecheck, tests, build
+```
+
+The stall path is covered without Docker, Kafka, or tokens:
+`supervisor-watchdog.test.ts` drives a fake clock and an in-memory publisher,
+asserting exactly one `supervisor.stalled` and one `run.cancel`, and no
+duplicates on a later tick. `supervisor-rules.test.ts` covers each rule plus a
+false-positive suite of ordinary Agent commands. `supervisor-chat.test.ts`
+covers tool allowlisting, the tool budget, the injection boundary, and the
+"not enough evidence" path. `supervisor-kafka.integration.test.ts` is skipped
+unless a broker is available.
+
+## Working on this repository
+
+- The repository lives in the WSL Ubuntu distro at `~/projects/CodeJam`, not on
+  the Windows filesystem.
+- Node comes from nvm, so a non-interactive shell needs
+  `export PATH="$HOME/.nvm/versions/node/v22.23.2/bin:$PATH"` before `npm`.
+- Kafka runs as the Compose project `codejam`; the broker publishes
+  `127.0.0.1:29092`.
+- Local state (ledger, workspaces, `codex-home`) lives in `.local/`, which is
+  git-ignored.
