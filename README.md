@@ -273,6 +273,41 @@ terraform fmt -check -recursive deploy/volcengine
 docker compose config
 ```
 
+## Limitations and next steps
+
+Trade-offs made for a three-day, zero-cost POC:
+
+- The chatbot runs on a local `qwen3:8b`, so the system reproduces without an
+  API key. Answers take 5 to 75 seconds and the model sometimes adds wording the
+  ledger never recorded. Detection is unaffected, since the rules are
+  deterministic and citations come from stored rows.
+- The rules detect and record and don't block. Containment and cleanup are
+  shown on the reliability path, where a stalled Runtime is cancelled and its
+  container removed.
+- The broker runs as a single Kafka node, and each topic has three partitions
+  with one copy of each. That is enough for per-run ordering and parallel
+  consumers, but losing the broker's disk loses the event log.
+- There are no user accounts. One shared token guards the API, and on loopback
+  it is empty by default, so local access is unauthenticated.
+
+Next:
+
+- An approval-gated remediation Agent would close the gap between detection and
+  action. Only the stall path recovers on its own today, so a critical alert
+  sits until an operator notices it. An Agent watching the same ledger could
+  contain a flagged run seconds after the evidence lands, keep watching
+  overnight, and cover more concurrent runs than one person can follow, with
+  every action confirmed by an operator and recorded in the ledger.
+- Events are keyed by `runId`, so per-run ordering holds as partitions grow, and
+  the ledger can be rebuilt by replaying the log. Scaling to many concurrent
+  users comes down to adding brokers, partitions, replicas, and consumers, which
+  leaves the event contract and the ledger's idempotency logic untouched.
+- Ledger replay tooling, alert acknowledgement, per-Agent budgets, and sandbox
+  events for network egress and filesystem writes feeding the same rules.
+
+See [docs/SUPERVISOR.md](docs/SUPERVISOR.md#known-limitations) for the reasoning,
+and [SECURITY.md](SECURITY.md) for the security posture.
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)

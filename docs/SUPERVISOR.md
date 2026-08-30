@@ -172,14 +172,14 @@ or Docker access — only these six read-only tools
 
 One question runs in two model calls:
 
-1. **Selection.** The model is offered the six tool schemas. Every returned call
-   is checked against the allowlist and parsed with its Zod schema; anything
-   else is discarded. If the model names no valid tool, a deterministic keyword
-   plan runs instead, so a small local model can never leave an answer
-   ungrounded.
-2. **Composition.** The gathered evidence is passed back as data inside an
-   `<<<EVIDENCE … EVIDENCE>>>` block, with **no tools offered**. Nothing written
-   in a log can reach a tool, because at the only point the model sees log text
+1. Tool selection. The model is offered the six tool schemas. Every returned
+   call is checked against the allowlist and parsed with its Zod schema, and
+   anything else is discarded. If the model names no valid tool, or its choices
+   return nothing, a deterministic keyword plan runs instead, so a small local
+   model cannot leave an answer ungrounded.
+2. Answer composition. The gathered evidence goes back as data inside an
+   `<<<EVIDENCE … EVIDENCE>>>` block, with no tools offered. Nothing written in
+   a log can reach a tool, because at the only point the model sees log text
    there is no tool to call.
 
 Further constraints:
@@ -238,9 +238,9 @@ containers still reach it through Docker Desktop's host alias, which is why
 Agent runs work while the chatbot cannot connect.
 
 Binding the Windows Ollama to `0.0.0.0` would fix it but exposes port 11434 to
-whatever network the machine is on. A safer development setup runs **a second
-Ollama inside WSL**. Install Ollama in WSL using its official Linux instructions,
-then keep the chatbot on a real loopback address:
+whatever network the machine is on. A safer development setup runs a second
+Ollama inside WSL. Install it there using the official Linux instructions, which
+keeps the chatbot on a real loopback address:
 
 ```bash
 ollama serve
@@ -271,28 +271,33 @@ docker compose up --detach --wait kafka
 
 ## Demo runbook
 
-**1. Normal run.** Create an Agent, send a prompt, then open **Supervisor**. The
-timeline shows `run.queued → run.started → runtime.heartbeat × N →
-run.tool_activity → run.completed`, each row carrying its Kafka
-topic·partition·offset. Counters move from Running to Healthy.
+### 1. Normal run
 
-**2. Suspicious activity.** Use the harmless quoted-string fixture in
-`docs/MANUAL_TESTING.md`. It makes the Agent execute a `printf` command whose
-data resembles secret access and exfiltration, without reading a secret or
-making a network request. The command evidence is flagged by
-`secret-file-access` and `credential-exfiltration`. The alert panel shows the
-rule, the matched evidence, and a link to the triggering event. Ask the chatbot
-"Check all logs for suspicious intentions" — it answers from `listAlerts` and
-cites the run and event.
+Create an Agent, send a prompt, then open **Supervisor**. The timeline shows
+`run.queued → run.started → runtime.heartbeat × N → run.tool_activity →
+run.completed`, each row carrying its Kafka topic·partition·offset. Counters
+move from Running to Healthy.
 
-**3. Missing heartbeat.** With a run in flight, press **Simulate missing
-heartbeat**. The backend verifies the container's labels and calls `docker
-pause`. Heartbeats genuinely stop, because the heartbeat process is inside that
-container. After eight seconds the watchdog writes `supervisor.stalled`, emits
-exactly one `run.cancel`, the command consumer verifies the labels and removes
-that exact container, and `supervisor.recovered` records the cleanup. Confirm
-with `docker ps -a --filter label=io.codejam.launchpad=agent-runtime` that no
-orphan remains, then start another run to show the platform still works.
+### 2. Suspicious activity
+
+Use the harmless quoted-string fixture in `docs/MANUAL_TESTING.md`. It makes the
+Agent execute a `printf` command whose data resembles secret access and
+exfiltration, without reading a secret or making a network request. The command
+evidence is flagged by `secret-file-access` and `credential-exfiltration`, and
+the alert panel shows the rule, the matched evidence, and a link to the
+triggering event. Ask the chatbot "Check all logs for suspicious intentions" and
+it answers from `listAlerts`, citing the run and event.
+
+### 3. Missing heartbeat
+
+With a run in flight, press **Simulate missing heartbeat**. The backend verifies
+the container's labels and calls `docker pause`. Heartbeats genuinely stop,
+because the heartbeat process is inside that container. After eight seconds the
+watchdog writes `supervisor.stalled` and emits exactly one `run.cancel`, the
+command consumer verifies the labels and removes that exact container, and
+`supervisor.recovered` records the cleanup. Confirm with `docker ps -a --filter
+label=io.codejam.launchpad=agent-runtime` that no orphan remains, then start
+another run to show the platform still works.
 
 ## Tests
 
@@ -315,6 +320,82 @@ false-positive suite of ordinary Agent commands. `supervisor-chat.test.ts`
 covers tool allowlisting, the tool budget, the injection boundary, and the
 "not enough evidence" path. `supervisor-kafka.integration.test.ts` is skipped
 unless a broker is available.
+
+## Known limitations
+
+Trade-offs made for a three-day, zero-cost POC.
+
+The chatbot runs on a local `qwen3:8b` through Ollama, so the system reproduces
+without an API key or a vendor account. Answers take 5 to 75 seconds depending
+on how many tools a question needs, and the model sometimes adds wording the
+ledger never recorded, such as calling an alert a security incident. Only the
+prose is affected: the rules are deterministic regex over stored events, and
+citations are built from the rows the tools returned rather than parsed out of
+the model's text. Set `SUPERVISOR_CHAT_BASE_URL` and `SUPERVISOR_CHAT_MODEL` to
+use any OpenAI-compatible endpoint instead.
+
+The rules detect and record but don't block since stopping an Agent mid-command
+needs a false-positive policy or user oversight. Containment is shown on the 
+reliability path instead, where a stalled Runtime is cancelled and its container 
+removed.
+
+The Compose broker is one KRaft node with three partitions at replication factor
+1. It survives a restart, not the loss of its disk.
+
+There is no identity, RBAC, or tenant isolation, and every operator shares one
+token. `SECURITY.md` covers the security posture.
+
+Commands are addressed by `runtimeInstanceId`, and a control plane ignores those
+belonging to another instance. Several control planes can share the topics, but
+each Runtime belongs to one of them.
+
+The chat model has to be reachable from the control plane. On Linux and macOS
+the default `127.0.0.1` candidate works; a control plane in WSL with Ollama on
+Windows needs the step described above.
+
+## Next steps
+
+An approval-gated remediation Agent would close the gap between detection and
+action. One failure recovers automatically today, the stalled Runtime. Every
+other finding waits for a human to read the dashboard, so the time to contain a
+run that trips `credential-exfiltration` is however long it takes someone to
+look. An Agent watching the same ledger could quarantine that run seconds after
+the evidence lands, keep watching overnight, and cover more concurrent runs than
+one operator can follow. It could also act on patterns that no single rule
+expresses, such as an Agent that trips the same rule on every run, or one that
+has failed five times in a row.
+
+The safety properties carry over. Every action is a command on
+`agent-run-commands-v1`, so an Agent's decisions are idempotent, label-verified
+before they touch a container, and recorded in the ledger as evidence beside the
+alert that prompted them. Operator confirmation still gates anything
+destructive; what changes is that the operator arrives to an action already
+proposed, with its evidence attached.
+
+For one laptop, a SQLite table and a polling loop would have been simpler. Kafka
+was chosen for properties the supervisor already depends on:
+
+- The event topic holds the durable record, and the ledger is a projection of
+  it. Every event stores its topic, partition, and offset, so a lost ledger can
+  be rebuilt by replaying the topic, and `INSERT OR IGNORE` on `eventId` makes
+  that replay safe.
+- Events and commands are keyed by `runId`, so one run's events stay ordered on
+  one partition while different runs spread across partitions. Partition count
+  can grow without breaking that.
+- The ledger writer and the command executor are separate consumer groups. A
+  metrics sink or an archive attaches as another group without changing the
+  control plane.
+- A slow or restarted consumer resumes from its committed offset, so events
+  queue in the log instead of being dropped.
+
+Serving many concurrent users then comes down to deployment: more brokers,
+partitions, replicas, and consumers per group, with the event contract, the
+keying, and the ledger's idempotency all unchanged.
+
+Also on the list: replay tooling that rebuilds the ledger from the topic, alert
+acknowledgement so an operator can triage a noisy rule, per-Agent budgets in the
+same middleware path, and sandbox events for network egress and filesystem
+writes feeding the same rules.
 
 ## Development notes
 
