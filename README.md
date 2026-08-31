@@ -219,9 +219,6 @@ CODEX_HOME=codex-home
 
 ### Cloud deployment on Volcengine ECS
 
-Volcengine is ByteDance's cloud platform and ECS is its virtual-machine service,
-so this path rents a Linux VM and runs the platform there instead of locally.
-
 These scripts come from the starter kit and are **not exercised in this
 submission**. `scripts/deploy-existing-ecs.sh` requires `ARK_API_KEY` and
 `ARK_MODEL`, and neither it nor the Terraform cloud-init installs Ollama, so
