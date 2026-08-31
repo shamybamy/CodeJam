@@ -14,13 +14,22 @@ It does not require a paid model API or cloud service.
 > isolation, or a hardened multi-tenant sandbox. Do not use production data or
 > credentials. See [SECURITY.md](SECURITY.md).
 
-## Screenshot
+## Screenshots
 
 ![Supervisor dashboard showing run health counters, the run table, and a credential-exfiltration alert with its matched command evidence](docs/assets/supervisor-dashboard.png)
 
 The Supervisor tab after a demo session: counters for run health, every run the
 ledger has seen, and an alert naming the rule, the command that triggered it,
 and the event it came from.
+
+![Run timeline showing a paused Runtime, the stall detected eight seconds later, the cancellation, and the recovery, with the Kafka topic, partition and offset of the stalled event](docs/assets/supervisor-recovery.png)
+
+One run's recovery, read from the ledger. The Runtime is paused at 05:02:30 and
+the watchdog marks the run stalled at 05:02:37, the stall threshold quoted at
+the top of the page. The container is then removed and the Agent recovered. The
+expanded row carries the Kafka position of that event, `agent-run-events-v1 ·
+partition 0 · offset 20`, which the broker assigned when the supervisor
+published it.
 
 ## Features
 

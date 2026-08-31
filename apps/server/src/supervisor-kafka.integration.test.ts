@@ -23,6 +23,12 @@ kafkaDescribe("Kafka supervisor integration", () => {
       NODE_ENV: "test",
       KAFKA_BROKERS: process.env.KAFKA_BROKERS ?? "127.0.0.1:29092",
       KAFKA_CLIENT_ID: "supervisor-integration-" + suffix,
+      // Topics are per-run as well as the consumer groups. Sharing the real
+      // topics let this test's synthetic run reach a running control plane,
+      // which materialised it in the operator's ledger and left it stalled
+      // forever, because no live Runtime owns "integration-runtime".
+      KAFKA_EVENTS_TOPIC: "agent-run-events-test-" + suffix,
+      KAFKA_COMMANDS_TOPIC: "agent-run-commands-test-" + suffix,
       KAFKA_EVENT_CONSUMER_GROUP: "supervisor-ledger-test-" + suffix,
       KAFKA_COMMAND_CONSUMER_GROUP: "supervisor-commands-test-" + suffix,
       SUPERVISOR_LEDGER_PATH: path.join(root, "ledger.sqlite"),
