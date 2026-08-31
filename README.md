@@ -54,8 +54,10 @@ This fork addresses that operational gap with a Kafka-backed run supervisor.
 Every Agent run publishes structured events to a local Kafka broker, a SQLite
 ledger reconciles them into queryable state, a watchdog recovers Runtimes that
 stop heartbeating, deterministic rules flag suspicious tool use, and a
-read-only operator chatbot answers questions from stored evidence. It runs
-entirely locally against Ollama.
+read-only operator chatbot answers questions from stored evidence. That chatbot
+can call only six read-only ledger tools, and it never sees log text and a tool
+in the same model call, so nothing an Agent writes into a log can trigger an
+action. It runs entirely locally against Ollama.
 
 See [docs/SUPERVISOR.md](docs/SUPERVISOR.md) for the architecture, event
 contracts, rule set, API reference, and the demo runbook.
