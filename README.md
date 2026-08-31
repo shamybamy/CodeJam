@@ -14,15 +14,13 @@ It does not require a paid model API or cloud service.
 > isolation, or a hardened multi-tenant sandbox. Do not use production data or
 > credentials. See [SECURITY.md](SECURITY.md).
 
-## Screenshots
+## Screenshot
 
-### Agent Playground
+![Supervisor dashboard showing run health counters, the run table, and a credential-exfiltration alert with its matched command evidence](docs/assets/supervisor-dashboard.png)
 
-![Agent Playground showing lifecycle controls, starter prompts, and the Codex Runtime](docs/assets/playground.jpg)
-
-### Create an Agent
-
-![Create Agent form with name, description, and workspace instructions](docs/assets/create-agent.jpg)
+The Supervisor tab after a demo session: counters for run health, every run the
+ledger has seen, and an alert naming the rule, the command that triggered it,
+and the event it came from.
 
 ## Features
 
@@ -36,14 +34,19 @@ It does not require a paid model API or cloud service.
 - Deterministic suspicious-activity alerts with stored evidence
 - Read-only operator chatbot grounded in six allowlisted ledger tools
 
-## Run supervisor middleware
+## Middleware problem and rationale
 
-This fork adds a Kafka-backed run supervisor on top of the baseline platform:
-every Agent run publishes structured events to a local Kafka broker, a SQLite
-ledger reconciles them into queryable run state, a watchdog recovers Runtimes
-that stop heartbeating, deterministic rules flag suspicious tool use, and a
-read-only operator chatbot answers questions from the stored evidence. It runs
-entirely locally against Ollama, with no paid service.
+The baseline can execute Agent runs, but it cannot tell an operator whether a
+run is still alive, reconstruct what it did, surface suspicious tool use, or
+recover a Runtime that dies silently. A frozen Runtime can leave an Agent stuck
+in `busy` with an orphaned container.
+
+This fork addresses that operational gap with a Kafka-backed run supervisor.
+Every Agent run publishes structured events to a local Kafka broker, a SQLite
+ledger reconciles them into queryable state, a watchdog recovers Runtimes that
+stop heartbeating, deterministic rules flag suspicious tool use, and a
+read-only operator chatbot answers questions from stored evidence. It runs
+entirely locally against Ollama.
 
 See [docs/SUPERVISOR.md](docs/SUPERVISOR.md) for the architecture, event
 contracts, rule set, API reference, and the demo runbook.
@@ -128,7 +131,7 @@ In the Web UI:
 4. Enter a task in the Playground, for example:
 
    ```text
-   Create a TypeScript hello-world CLI, add a test, and run it.
+   Create a file named health-check.txt containing exactly OK, then reply done.
    ```
 
 The Agent can write files, run commands, and continue the same Codex session in
@@ -145,11 +148,18 @@ containers but keeps Agent workspaces and conversations.
 
 Run the same `npm run poc` command to continue later.
 
-The Kafka supervisor requires Docker Compose. A baseline-only Podman path is
-documented in [docs/LOCAL_POC.md](docs/LOCAL_POC.md), but it disables the
-middleware and is not the reviewer path.
+The complete Kafka supervisor requires Docker with Docker Compose and is the 
+supported reviewer path. The starter platform can run with Podman as documented 
+in [docs/LOCAL_POC.md](docs/LOCAL_POC.md), but that configuration disables Kafka
+and all supervisor middleware features.
 
-## Docker Compose
+## Other ways to run it
+
+`npm run poc` above is the supported path for reviewers and for the demo. The
+three sections below are alternatives that behave differently, and the last two
+are inherited from the starter kit rather than exercised in this submission.
+
+### Docker Compose
 
 Create and edit the configuration:
 
@@ -157,9 +167,13 @@ Create and edit the configuration:
 ./scripts/bootstrap-local.sh
 ```
 
-The Compose deployment path is retained from the starter repository. For local
-review, prefer `npm run poc`. If using Compose directly, copy `.env.example` and
-review its values:
+Compose runs the control plane inside a container. It does not set
+`RUNTIME_PROVIDER`, which therefore falls back to `local-process`, so Codex runs
+in the application container instead of a disposable per-run Runtime. The
+labelled Runtime containers, the missing-heartbeat simulation, and
+exact-container cancellation do not apply on this path.
+
+If using Compose directly, copy `.env.example` and review its values:
 
 ```dotenv
 MODEL_PROVIDER=ollama
@@ -181,7 +195,9 @@ Open <http://localhost:3000>. Stop it without deleting Agent data:
 docker compose down
 ```
 
-## Development
+### Development
+
+Hot-reloading Vite and Fastify servers for working on the code:
 
 ```bash
 npm install
@@ -201,7 +217,15 @@ AGENT_WORKSPACE_ROOT=workspaces
 CODEX_HOME=codex-home
 ```
 
-## Deployment
+### Cloud deployment on Volcengine ECS
+
+Volcengine is ByteDance's cloud platform and ECS is its virtual-machine service,
+so this path rents a Linux VM and runs the platform there instead of locally.
+
+These scripts come from the starter kit and are **not exercised in this
+submission**. `scripts/deploy-existing-ecs.sh` requires `ARK_API_KEY` and
+`ARK_MODEL`, and neither it nor the Terraform cloud-init installs Ollama, so
+this path needs a paid model API. The local POC does not.
 
 - [Existing Linux ECS with Docker](docs/DEPLOYMENT.md#existing-linux-ecs)
 - [Complete Volcengine environment with Terraform](docs/DEPLOYMENT.md#terraform-deployment)
@@ -241,31 +265,84 @@ cp deploy/volcengine/terraform.tfvars.example \
 
 See [.env.example](.env.example) for all Runtime and resource-limit options.
 
-## How it works
+## Design summary
+
+The browser remains the operator interface, while trusted decisions and event
+processing live in the Fastify control plane. The Runtime wrapper instruments
+the less-trusted Agent container, Kafka carries ordered events and commands,
+SQLite provides the queryable projection, and the watchdog closes the recovery
+loop through a label-verified cancellation path.
+
+### Architecture diagram
 
 ```mermaid
 flowchart LR
-    UI["React Playground + Supervisor"] --> API["Fastify control plane"]
-    API --> Runtime["Disposable Agent Runtime container"]
-    Runtime --> Ollama["Local Ollama qwen3:8b"]
-    Runtime --> Events["Kafka run events"]
-    API --> Events
-    Events --> Ledger["SQLite run ledger + alerts"]
-    Ledger --> API
-    Watchdog["Heartbeat watchdog"] --> Commands["Kafka run commands"]
-    Commands --> API
-    API -->|verify labels + remove| Runtime
-    Ledger --> Chat["Read-only operator chatbot"]
-    Chat --> Ollama
+    UI["React Playground<br/>+ Supervisor"] -->|REST| API["Fastify API"]
+
+    subgraph Control["Control plane - trusted, single-user POC"]
+        API --> Service["AgentService"]
+        Rules["Deterministic rules"]
+        Ledger[("SQLite ledger<br/>runs, events, alerts")]
+        Chat["Read-only chatbot"]
+    end
+
+    subgraph Sandbox["Agent execution - ordinary Docker container"]
+        Runtime["Runtime wrapper<br/>+ Codex CLI"]
+    end
+
+    Service -->|spawn| Runtime
+    Runtime -->|"heartbeats, tool activity"| Service
+    Service -->|"redacted events"| Topic[["agent-run-events-v1"]]
+    Topic --> Rules
+    Topic -->|"materialise runs"| Ledger
+    Rules -->|"alerts with evidence"| Ledger
+    Ledger -->|"status + evidence"| API
+    API --> Chat
+    Chat -->|"6 read-only tools"| Ledger
+    Runtime -->|"model requests"| Ollama["Local Ollama<br/>qwen3:8b"]
+    Chat -->|"grounded prompt"| Ollama
 ```
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
 Deleting an Agent archives its workspace under `workspaces/.deleted/`.
 
+The diagram marks the trusted control-plane boundary, the less-trusted Agent
+execution boundary, and the path evidence takes from a running container into
+Kafka, the ledger, the dashboard, and the chatbot. The recovery path, where the
+watchdog cancels a stalled run through the command topic, is a separate sequence
+diagram in [docs/SUPERVISOR.md](docs/SUPERVISOR.md#recovery-loop).
+
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component and extension
 boundaries.
 
-## Validation
+## Demo steps
+
+These steps exercise the normal behavior, stored evidence, and a controlled
+failure-and-recovery case. The full reviewer-safe prompts and expected output
+are in [docs/MANUAL_TESTING.md](docs/MANUAL_TESTING.md).
+
+1. Start the complete stack with
+   `ENABLE_DEMO_CONTROLS=true npm run poc`, create an Agent, and ask it to write
+   `health-check.txt`. Open **Supervisor** and show the correlated Kafka-backed
+   timeline from `run.queued` through `run.completed`.
+2. Run the harmless suspicious-command fixture from the manual guide. Show the
+   deterministic alerts, their triggering evidence, and the chatbot's
+   ledger-backed answer and citations.
+3. Start the 30-second heartbeat fixture and select **Simulate missing
+   heartbeat**. Show `supervisor.stalled`, the single `run.cancel` command, the
+   exact-container cleanup, `supervisor.recovered`, and the Agent returning to
+   `ready`.
+4. Start one short follow-up run to prove that the platform remains usable and
+   controllable after recovery.
+
+## Automated tests and validation
+
+`npm run check` runs the server and web type checks, automated server and UI
+tests, and both production builds. The suites cover event validation and
+redaction, ledger idempotency, rule matches and false positives, watchdog
+recovery, command handling, chatbot grounding, API behavior, and the Supervisor
+dashboard. The real-broker integration suite is opt-in; the Docker, Kafka,
+Ollama, and browser path is covered by the manual guide.
 
 ```bash
 npm run check
@@ -273,26 +350,48 @@ terraform fmt -check -recursive deploy/volcengine
 docker compose config
 ```
 
+## Secret handling
+
+The default local path uses Ollama and requires no model credential. `.env`,
+`.env.production`, local state, and Runtime workspaces are git-ignored; event
+payloads are redacted before they reach Kafka or SQLite. Do not use production
+data or credentials. See [SECURITY.md](SECURITY.md) for the complete security
+posture.
+
 ## Limitations and next steps
 
-Trade-offs made for a three-day, zero-cost POC:
+These are deliberate trade-offs made to keep a three-day, zero-cost POC
+focused, reproducible, and demonstrable on one laptop:
 
-- The chatbot runs on a local `qwen3:8b`, so the system reproduces without an
-  API key. Answers take 5 to 75 seconds and the model sometimes adds wording the
-  ledger never recorded. Detection is unaffected, since the rules are
-  deterministic and citations come from stored rows.
-- The rules detect and record and don't block. Containment and cleanup are
-  shown on the reliability path, where a stalled Runtime is cancelled and its
-  container removed.
-- The broker runs as a single Kafka node, and each topic has three partitions
-  with one copy of each. That is enough for per-run ordering and parallel
-  consumers, but losing the broker's disk loses the event log.
-- There are no user accounts. One shared token guards the API, and on loopback
-  it is empty by default, so local access is unauthenticated.
+- **Small local chat model.** We chose `qwen3:8b` so reviewers can reproduce the
+  system without an API key, vendor account, or usage cost. The three-day
+  window did not allow meaningful evaluation and tuning of multiple local
+  models. As a result, answers take 5 to 75 seconds and may add wording the
+  ledger never recorded. Detection is unaffected because the rules are
+  deterministic and citations are constructed from stored rows.
+- **Detection rather than automatic blocking.** Safely stopping an Agent during
+  a command requires a false-positive policy, approval and override semantics,
+  and more adversarial testing than the hackathon allowed. The rules therefore
+  detect and record suspicious activity but do not block it. We concentrated
+  enforcement work on one fully testable path: a stalled Runtime is cancelled,
+  its exact labelled container is removed, and the recovery is recorded.
+- **Single-node Kafka.** A multi-broker deployment and broker-failure testing
+  would add infrastructure work without changing the middleware contract being
+  demonstrated. The local broker therefore uses one KRaft node, three
+  partitions per topic, and replication factor 1. This preserves per-run
+  ordering and supports parallel consumers, but losing the broker's disk loses
+  the event log.
+- **Single-user access model.** Identity, RBAC, and tenant isolation are
+  substantial middleware capabilities of their own. Given the time limit, we
+  prioritised run instrumentation, evidence, and recovery instead. One shared
+  token guards the API; on loopback it is empty by default, so local access is
+  unauthenticated and the POC must not be treated as a multi-user deployment.
 
-Next:
+Extensions:
 
-- An approval-gated remediation Agent would close the gap between detection and
+With more development time, the desired extensions would be:
+
+- An approval-gated remediation Agent to close the gap between detection and
   action. Only the stall path recovers on its own today, so a critical alert
   sits until an operator notices it. An Agent watching the same ledger could
   contain a flagged run seconds after the evidence lands, keep watching

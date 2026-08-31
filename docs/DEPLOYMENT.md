@@ -1,5 +1,12 @@
 # Deployment
 
+> [!NOTE]
+> This guide is inherited from the starter kit and is **not exercised in this
+> submission**. Both paths require a paid Volcengine Ark key, and neither
+> installs Ollama on the remote host, so the local-model default cannot serve
+> them. The reviewer path is `npm run poc`, documented in the
+> [README](../README.md#4-start-the-poc).
+
 Use one of two Volcengine ECS paths:
 
 - Install and deploy to an existing Linux ECS instance.

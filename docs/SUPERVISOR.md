@@ -1,5 +1,9 @@
 # Kafka Run Supervisor
 
+This is the detailed technical reference for the middleware. Start with the
+repository [README](../README.md) for the reviewer path, setup, concise design
+summary, demo steps, tests, limitations, and secret-handling guidance.
+
 The middleware capability added to the starter kit: every Agent run emits
 structured events to Kafka, a SQLite ledger reconciles them into queryable run
 state, a watchdog detects Runtimes that stop heartbeating and recovers them, a
@@ -21,29 +25,41 @@ recoverable, and it does so from evidence rather than from guesswork.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  UI[React dashboard<br/>2s polling] -->|REST| API[Fastify control plane]
-  API --> SVC[AgentService]
-  SVC -->|spawn| RT[Agent Runtime container<br/>heartbeat wrapper + Codex CLI]
-  RT -->|control lines on stderr| SVC
-  SVC -->|run + runtime + tool events| KE[(Kafka<br/>agent-run-events-v1)]
-  KE --> LEDGER[(SQLite ledger<br/>runs / events / alerts)]
-  KE --> RULES[Suspicious-activity rules]
-  RULES -->|alert.raised| KE
-  RULES --> LEDGER
-  WD[Watchdog<br/>1s tick] --> LEDGER
-  WD -->|run.cancel| KC[(Kafka<br/>agent-run-commands-v1)]
-  KC --> SVC
-  SVC -->|verify labels, then remove| RT
-  LEDGER --> API
-  API --> CHAT[Operator chatbot<br/>6 read-only tools]
-  CHAT --> OLLAMA[Local Ollama<br/>qwen3:8b]
-  RT --> OLLAMA
-```
+The system-level view, including the trust boundaries and the path evidence
+takes from a container into the ledger, is the one-page diagram in the
+[README](../README.md#one-page-architecture-diagram). This document covers the
+recovery loop, which that diagram deliberately leaves out.
 
 Both topics are keyed by `runId`, so every event and command for one run stays
 in order on one partition.
+
+### Recovery loop
+
+```mermaid
+sequenceDiagram
+    participant RT as Runtime container
+    participant CP as Control plane
+    participant EV as agent-run-events-v1
+    participant DB as SQLite ledger
+    participant WD as Watchdog
+    participant CMD as agent-run-commands-v1
+
+    RT->>CP: heartbeat every 2s
+    CP->>EV: runtime.heartbeat
+    EV->>DB: materialise run health
+    Note over RT: container frozen, heartbeats stop
+    WD->>DB: claim stall after 8s
+    DB-->>WD: one claim only
+    WD->>EV: supervisor.stalled
+    WD->>CMD: run.cancel
+    CMD->>CP: consume once
+    CP->>RT: verify labels, remove container
+    CP->>EV: supervisor.recovered
+```
+
+An operator cancelling from the dashboard joins the same path at `run.cancel`,
+with `source: "operator"`, so manual and automatic cancellation share one
+idempotent, label-verified executor.
 
 ## Event and command contracts
 
@@ -318,8 +334,15 @@ asserting exactly one `supervisor.stalled` and one `run.cancel`, and no
 duplicates on a later tick. `supervisor-rules.test.ts` covers each rule plus a
 false-positive suite of ordinary Agent commands. `supervisor-chat.test.ts`
 covers tool allowlisting, the tool budget, the injection boundary, and the
-"not enough evidence" path. `supervisor-kafka.integration.test.ts` is skipped
-unless a broker is available.
+"not enough evidence" path.
+
+`supervisor-kafka.integration.test.ts` is skipped by default so the suite runs
+without Docker. With a broker up, it round-trips events and commands through the
+real bus and asserts both idempotency guarantees hold:
+
+```bash
+RUN_KAFKA_INTEGRATION=1 npm run test -w @launchpad/server
+```
 
 ## Known limitations
 

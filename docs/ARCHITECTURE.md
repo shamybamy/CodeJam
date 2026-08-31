@@ -1,6 +1,10 @@
 # Architecture
 
-Volc Agent Launchpad is a single-node control plane for hackathon use.
+This is a single-node control plane for hackathon use. It describes the baseline
+platform: lifecycle, storage, and Runtime providers. The run supervisor built on
+top of it — Kafka topics, the SQLite ledger, the watchdog, the rules, and the
+operator chatbot — is documented in [SUPERVISOR.md](SUPERVISOR.md), and the
+system-level diagram is in the [README](../README.md#one-page-architecture-diagram).
 
 ```mermaid
 flowchart LR
@@ -11,16 +15,16 @@ flowchart LR
     Service --> Runner{"AgentRunner"}
     Runner -->|Local POC| Container["Disposable Runtime container"]
     Runner -->|ECS| Process["Codex child process"]
-    Container --> Ark["Volcengine Ark"]
-    Process --> Ark
+    Container --> Model["Model endpoint<br/>local Ollama by default"]
+    Process --> Model
 ```
 
 ## Components
 
 ### Web UI
 
-Lists Agents, manages lifecycle actions, submits prompts, and polls asynchronous
-Runs. It never receives the Ark API key.
+Lists Agents, manages lifecycle actions, submits prompts, polls asynchronous
+Runs, and renders the supervisor dashboard. It never receives the model API key.
 
 ### Fastify API
 
@@ -45,6 +49,7 @@ Interrupted Runs become `cancelled` after a restart.
 
 ```text
 data/launchpad.json       Agent, message, and Run metadata
+data/supervisor.sqlite    Run ledger: runs, events, alerts, commands
 workspaces/AgentID/       Agent-created files
 workspaces/.deleted/      Archived deleted workspaces
 codex-home/               Codex configuration and sessions
@@ -77,6 +82,10 @@ the stored Codex thread, and escalate termination after a grace period.
 | Glass Box | `AgentRunner`, `AgentRun` | Emit and display correlated execution events. |
 | Bouncer | API routes, Agent ownership | Add identity and server-side authorization. |
 | Kill Switch | `AgentRunner` | Add threat-specific policy or a stronger sandbox. |
+
+The run supervisor uses the first and third seams: `RunnerLifecycleEvent`
+carries heartbeats and tool activity out of the Runtime, and the same
+`AgentRunner` boundary performs label-verified cancellation.
 
 The current container or ECS instance is the POC trust boundary. Ordinary
 containers are not hardened multi-tenant isolation.
